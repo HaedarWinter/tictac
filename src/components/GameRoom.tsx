@@ -29,10 +29,9 @@ interface GameMessage {
 // PeerJS configuration
 const peerConfig = {
   // Primary PeerJS server
-  host: 'peerjs-server.herokuapp.com',
+  host: '0.peerjs.com',
   secure: true,
   port: 443,
-  path: '/',
   debug: 3,
   config: {
     iceServers: [
@@ -66,20 +65,19 @@ const peerConfig = {
 
 // Backup PeerJS servers in case the primary fails
 const backupPeerConfig = {
-  host: '0.peerjs.com',
-  secure: true,
-  port: 443,
-  debug: 3,
-  config: peerConfig.config // Reuse the same ICE servers
-};
-
-// CloudFlare backup server
-const cloudflareBackupConfig = {
   host: 'peerjs.cloudflare.com',
   secure: true,
   port: 443,
   path: '/',
-  debug: 3, 
+  debug: 3,
+  config: peerConfig.config // Reuse the same ICE servers
+};
+
+// CloudFlare backup server with no host (cloud)
+const cloudflareBackupConfig = {
+  // Use the public PeerJS cloud service as final backup
+  key: 'peerjs',
+  debug: 3,
   config: peerConfig.config
 };
 
@@ -174,7 +172,8 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
     }
 
     setConnectionStatus('initializing');
-    
+    let connectionTimeout: NodeJS.Timeout | null = null;
+
     // Dynamically import PeerJS to avoid SSR issues
     const initPeer = async () => {
       try {
@@ -190,13 +189,63 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         
         // Use current server config based on connection attempt
         const currentConfig = serverConfigs[connectionAttempt % serverConfigs.length];
+        
+        // Mobile optimization - detect if running on mobile
+        // TypeScript cast the navigator.userAgent to string to safely use includes/match
+        const userAgent = navigator.userAgent as string;
+        if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent)) {
+          console.log('Mobile device detected, optimizing PeerJS config');
+          
+          // First prioritize TURN servers, then STUN servers
+          const turnServers = currentConfig.config.iceServers.filter(server => {
+            const urls = (server as RTCIceServer).urls;
+            return typeof urls === 'string' 
+              ? urls.includes('turn:') 
+              : Array.isArray(urls) && urls.some(url => url.includes('turn:'));
+          });
+          
+          const stunServers = currentConfig.config.iceServers.filter(server => {
+            const urls = (server as RTCIceServer).urls;
+            return typeof urls === 'string' 
+              ? urls.includes('stun:') 
+              : Array.isArray(urls) && urls.some(url => url.includes('stun:'));
+          });
+          
+          // Update the ICE servers with TURN first, then STUN
+          currentConfig.config.iceServers = [...turnServers, ...stunServers];
+          currentConfig.debug = 0; // Reduce debug logging on mobile to improve performance
+        }
+        
         const newPeer = new Peer(peerId, currentConfig);
         
         let peerConnected = false;
+        
+        // Set a global timeout to abandon this server if it takes too long
+        connectionTimeout = setTimeout(() => {
+          if (!peerConnected && connectionAttempt < serverConfigs.length - 1) {
+            console.log('Server connection timed out, trying next server...');
+            setConnectionStatus('retrying');
+            setConnectionAttempt(prev => prev + 1);
+            
+            // Clean up the peer that didn't connect properly
+            try {
+              if (newPeer && !newPeer.destroyed) {
+                newPeer.destroy();
+              }
+            } catch (e) {
+              console.error('Error while destroying timed out peer:', e);
+            }
+          } else if (!peerConnected) {
+            // If we've tried all servers and still can't connect
+            setConnectionStatus('failed');
+            setError('Unable to connect to any PeerJS server. Please check your internet connection and try again.');
+          }
+        }, 8000); // 8 seconds timeout per server
 
         newPeer.on('open', (id) => {
           console.log(`Peer opened with ID: ${id}`);
           peerConnected = true;
+          if (connectionTimeout) clearTimeout(connectionTimeout);
           setPeer(newPeer);
           
           // If we're the host, we're "connected" as soon as the peer is open
@@ -218,7 +267,7 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           } else {
             setConnectionStatus('failed');
           }
-          setError(`Connection error: ${err.type}: ${err.message}`);
+          setError(`Connection error: ${err.type || ''}: ${err.message || 'Unknown error'}`);
         });
 
         // Handle incoming connections
@@ -232,6 +281,7 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
 
         // Cleanup on unmount
         return () => {
+          if (connectionTimeout) clearTimeout(connectionTimeout);
           if (newPeer && !newPeer.destroyed) {
             console.log('Destroying peer connection');
             newPeer.destroy();
