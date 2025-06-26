@@ -28,27 +28,16 @@ interface GameMessage {
 
 // PeerJS configuration
 const peerConfig = {
-  // Primary PeerJS server
-  host: '0.peerjs.com',
-  secure: true,
-  port: 443,
-  debug: 3,
+  // Use PeerJS cloud service - no specific host
+  debug: 1, // Minimal debug for better performance
   config: {
     iceServers: [
+      // Google's public STUN servers
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
-      { urls: 'stun:stun.ekiga.net' },
-      { urls: 'stun:stun.ideasip.com' },
-      { urls: 'stun:stun.stunprotocol.org:3478' },
-      // Public TURN servers
-      { 
-        urls: 'turn:numb.viagenie.ca',
-        username: 'webrtc@live.com',
-        credential: 'muazkh'
-      },
+      
+      // Public TURN servers for NAT traversal
       {
         urls: 'turn:openrelay.metered.ca:80',
         username: 'openrelayproject',
@@ -58,35 +47,28 @@ const peerConfig = {
         urls: 'turn:openrelay.metered.ca:443',
         username: 'openrelayproject',
         credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
       }
     ]
   }
 };
 
-// Backup PeerJS servers in case the primary fails
-const backupPeerConfig = {
-  host: 'peerjs.cloudflare.com',
-  secure: true,
-  port: 443,
-  path: '/',
-  debug: 3,
-  config: peerConfig.config // Reuse the same ICE servers
-};
-
-// CloudFlare backup server with no host (cloud)
-const cloudflareBackupConfig = {
-  // Use the public PeerJS cloud service as final backup
-  key: 'peerjs',
-  debug: 3,
-  config: peerConfig.config
-};
-
 // Add a helper function to validate gameId format
 const isValidPeerIdFormat = (id: string): boolean => {
   // PeerJS ID should be alphanumeric and reasonable length
-  // Typical UUID pattern shortened is a common format for our gameIds
-  return /^[a-zA-Z0-9-_]{4,16}$/.test(id);
+  // Accept UUIDs and other common formats
+  return /^[a-zA-Z0-9-_]{4,36}$/.test(id);
 };
+
+// Type for PeerJS errors
+interface PeerJSError {
+  type?: string;
+  message?: string;
+}
 
 export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps) {
   const [gameState, setGameState] = useState<GameState>(createNewGame());
@@ -106,9 +88,9 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
   // Connection status tracking
   const [connectionStatus, setConnectionStatus] = useState<'initializing' | 'connecting' | 'connected' | 'failed' | 'retrying'>('initializing');
   
-  // Add new states for connection attempts
-  const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const [serverConfigs] = useState([peerConfig, backupPeerConfig, cloudflareBackupConfig]);
+  // Maximum number of reconnection attempts
+  const maxReconnectAttempts = 3;
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
   
   // For SSR compatibility
   useEffect(() => {
@@ -183,254 +165,307 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         // Use the gameId as the peer ID for the host, or generate a random ID for guest
         const peerId = isHost ? gameId : Math.random().toString(36).substring(2, 15);
         console.log(`Initializing peer with ID: ${peerId} (${isHost ? 'host' : 'guest'})`);
-        console.log(`Using server config attempt ${connectionAttempt + 1}/${serverConfigs.length}`);
+        console.log(`Using cloud server with retry attempt ${reconnectAttempts + 1}/${maxReconnectAttempts}`);
         
         setConnectionStatus('connecting');
         
-        // Use current server config based on connection attempt
-        const currentConfig = serverConfigs[connectionAttempt % serverConfigs.length];
-        
         // Mobile optimization - detect if running on mobile
-        // TypeScript cast the navigator.userAgent to string to safely use includes/match
         const userAgent = navigator.userAgent as string;
-        if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent)) {
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
+        
+        // Create a copy of the peer config we can modify
+        const currentPeerConfig = JSON.parse(JSON.stringify(peerConfig));
+        
+        if (isMobile) {
           console.log('Mobile device detected, optimizing PeerJS config');
           
           // First prioritize TURN servers, then STUN servers
-          const turnServers = currentConfig.config.iceServers.filter(server => {
-            const urls = (server as RTCIceServer).urls;
+          const turnServers = currentPeerConfig.config.iceServers.filter((server: RTCIceServer) => {
+            const urls = server.urls;
             return typeof urls === 'string' 
               ? urls.includes('turn:') 
               : Array.isArray(urls) && urls.some(url => url.includes('turn:'));
           });
           
-          const stunServers = currentConfig.config.iceServers.filter(server => {
-            const urls = (server as RTCIceServer).urls;
+          const stunServers = currentPeerConfig.config.iceServers.filter((server: RTCIceServer) => {
+            const urls = server.urls;
             return typeof urls === 'string' 
               ? urls.includes('stun:') 
               : Array.isArray(urls) && urls.some(url => url.includes('stun:'));
           });
           
           // Update the ICE servers with TURN first, then STUN
-          currentConfig.config.iceServers = [...turnServers, ...stunServers];
-          currentConfig.debug = 0; // Reduce debug logging on mobile to improve performance
+          currentPeerConfig.config.iceServers = [...turnServers, ...stunServers];
+          currentPeerConfig.debug = 0; // Reduce debug logging on mobile to improve performance
         }
         
-        const newPeer = new Peer(peerId, currentConfig);
+        // Initialize PeerJS connection using cloud server (no host specified)
+        // Add a random value to avoid ID conflicts on reconnection attempts
+        const peerIdWithSuffix = reconnectAttempts > 0 ? `${peerId}-${Date.now().toString().slice(-4)}` : peerId;
+        const newPeer = new Peer(peerIdWithSuffix, currentPeerConfig);
         
+        // Track if the peer connection was successful
         let peerConnected = false;
         
-        // Set a global timeout to abandon this server if it takes too long
+        // Set a global timeout to abandon this attempt if it takes too long
         connectionTimeout = setTimeout(() => {
-          if (!peerConnected && connectionAttempt < serverConfigs.length - 1) {
-            console.log('Server connection timed out, trying next server...');
+          if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
+            console.log('Connection timed out, retrying...');
             setConnectionStatus('retrying');
-            setConnectionAttempt(prev => prev + 1);
+            setReconnectAttempts(prev => prev + 1);
             
             // Clean up the peer that didn't connect properly
-            try {
-              if (newPeer && !newPeer.destroyed) {
+            if (newPeer && !newPeer.destroyed) {
+              try {
                 newPeer.destroy();
+              } catch (err) {
+                console.error('Error destroying peer:', err);
               }
-            } catch (e) {
-              console.error('Error while destroying timed out peer:', e);
             }
+            
+            // Retry with a delay - increase delay with each attempt
+            const retryDelay = 1500 + (reconnectAttempts * 500);
+            setTimeout(initPeer, retryDelay);
           } else if (!peerConnected) {
-            // If we've tried all servers and still can't connect
             setConnectionStatus('failed');
-            setError('Unable to connect to any PeerJS server. Please check your internet connection and try again.');
+            setError('Failed to connect after multiple attempts. Please check your internet connection and try again.');
           }
-        }, 8000); // 8 seconds timeout per server
-
+        }, 12000); // 12 seconds timeout for connection attempt
+        
+        // Handle successful open event
         newPeer.on('open', (id) => {
-          console.log(`Peer opened with ID: ${id}`);
+          console.log('Peer connection established with ID:', id);
           peerConnected = true;
-          if (connectionTimeout) clearTimeout(connectionTimeout);
           setPeer(newPeer);
           
-          // If we're the host, we're "connected" as soon as the peer is open
-          // Guests need to actually establish a connection to the host
+          // Clear the timeout since we're connected
+          if (connectionTimeout) {
+            clearTimeout(connectionTimeout);
+            connectionTimeout = null;
+          }
+          
+          // For host: set up connection handlers
           if (isHost) {
-            setConnectionStatus('connected');
+            setConnectionStatus('connecting'); // Waiting for opponent
+            
+            newPeer.on('connection', (connection) => {
+              console.log('Received connection from:', connection.peer);
+              setOpponentConnected(true);
+              setConnectionStatus('connected');
+              setConn(connection);
+              setupConnectionHandlers(connection);
+              
+              // Send current game state to the opponent
+              connection.on('open', () => {
+                console.log('Connection opened with opponent');
+                connection.send({
+                  type: 'gameState',
+                  gameState: gameState
+                });
+              });
+            });
           }
         });
-
+        
+        // Handle errors
         newPeer.on('error', (err) => {
           console.error('PeerJS error:', err);
-          // Try another server if connection failed
-          if (!peerConnected && connectionAttempt < serverConfigs.length - 1) {
-            console.log(`Connection attempt failed, trying next server...`);
-            setConnectionStatus('retrying');
-            setTimeout(() => {
-              setConnectionAttempt(prev => prev + 1);
-            }, 1000);
-          } else {
-            setConnectionStatus('failed');
-          }
-          setError(`Connection error: ${err.type || ''}: ${err.message || 'Unknown error'}`);
-        });
-
-        // Handle incoming connections
-        newPeer.on('connection', (connection) => {
-          console.log('Incoming connection received');
-          setConn(connection);
-          setOpponentConnected(true);
-          setConnectionStatus('connected');
-          setupConnectionHandlers(connection);
-        });
-
-        // Cleanup on unmount
-        return () => {
-          if (connectionTimeout) clearTimeout(connectionTimeout);
-          if (newPeer && !newPeer.destroyed) {
-            console.log('Destroying peer connection');
-            newPeer.destroy();
-          }
-        };
-      } catch (err) {
-        console.error('Error initializing PeerJS:', err);
-        setError('Failed to initialize connection');
-        
-        // Try another server if an exception occurred
-        if (connectionAttempt < serverConfigs.length - 1) {
-          setConnectionStatus('retrying');
-          setTimeout(() => {
-            setConnectionAttempt(prev => prev + 1);
-          }, 1000);
-        } else {
-          setConnectionStatus('failed');
-        }
-      }
-    };
-
-    initPeer();
-  }, [isClient, isHost, gameId, setupConnectionHandlers, connectionAttempt, serverConfigs]);
-
-  // For the guest (joinee), establish connection to host
-  useEffect(() => {
-    // Only attempt to connect if we're the joiner, peer is initialized, and on client side
-    if (!isHost && peer && gameId && isClient) {
-      // Validate gameId format to catch obviously incorrect formats
-      if (!isValidPeerIdFormat(gameId)) {
-        console.error('Invalid game ID format:', gameId);
-        setConnectionStatus('failed');
-        setError('Invalid game ID format. Please go back and enter a valid game code.');
-        return;
-      }
-      
-      let retryCount = 0;
-      const maxRetries = 3;
-      let retryTimeout: NodeJS.Timeout | null = null;
-      let connectionTimeout: NodeJS.Timeout | null = null;
-      
-      setConnectionStatus('connecting');
-      
-      // Set a global timeout for the entire connection process
-      connectionTimeout = setTimeout(() => {
-        if (connectionStatus !== 'connected') {
-          console.error('Connection timed out after all retries');
-          setConnectionStatus('failed');
-          setError('Connection timed out. The host may have left the game or is offline. Please try again or create a new game.');
-        }
-      }, 20000); // 20 seconds total for all retries
-      
-      const attemptConnection = () => {
-        try {
-          console.log(`Attempting to connect to host with ID: ${gameId} (attempt ${retryCount + 1}/${maxRetries + 1})`);
-          const connection = peer.connect(gameId, {
-            reliable: true, // Ensure reliable connection
-            serialization: 'json', // Explicitly use JSON serialization for compatibility
-            metadata: { guest: true } // Add metadata for identification
-          });
           
-          // Handle connection events
-          connection.on('open', () => {
-            console.log('Connection to host established successfully');
-            if (retryTimeout) clearTimeout(retryTimeout);
-            if (connectionTimeout) clearTimeout(connectionTimeout);
-            setOpponentConnected(true);
-            setConnectionStatus('connected');
-            setupConnectionHandlers(connection);
+          // Try another attempt if connection failed
+          if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
+            console.log(`Connection attempt failed, retrying...`);
+            setConnectionStatus('retrying');
             
-            // Add welcome message for guest
-            setChatMessages([{
-              text: "Connected to game host. You can now chat with your opponent!",
-              sender: "system",
-              timestamp: Date.now()
-            }]);
-          });
-  
-          connection.on('error', (err) => {
-            console.error('Connection error:', err);
+            // Clean up
+            if (newPeer && !newPeer.destroyed) {
+              newPeer.destroy();
+            }
             
-            // Provide more user-friendly error messages based on error type
-            let errorMessage = 'Failed to connect to host.';
+            setTimeout(() => {
+              setReconnectAttempts(prev => prev + 1);
+              initPeer();
+            }, 1500);
+          } else {
+            // Format a user-friendly error message
+            let errorMessage = 'Connection failed.';
+            const errorType = (err as PeerJSError)?.type || '';
+            const errorMsg = (err as PeerJSError)?.message || '';
             
-            // Handle different error types in a more type-safe way
-            const errorType = (err as any)?.type || '';
-            const errorMsg = (err as any)?.message || '';
-            
-            if (errorType === 'peer-unavailable' || errorMsg.includes('Could not connect to peer')) {
-              errorMessage = 'Host not found. The game may have ended or the host is offline.';
-            } else if (errorType === 'disconnected' || errorMsg.includes('disconnect')) {
-              errorMessage = 'Connection lost. The host may have left the game.';
-            } else if (errorType === 'network' || errorType === 'server-error' || 
-                       errorMsg.includes('network') || errorMsg.includes('server')) {
+            if (errorType === 'network' || errorType === 'server-error' || 
+                errorMsg.includes('server') || errorMsg.includes('network')) {
               errorMessage = 'Network or server error. Please check your internet connection and try again.';
+            } else if (errorType === 'browser-incompatible') {
+              errorMessage = 'Your browser may not fully support WebRTC. Please try a different browser.';
+            } else if (errorType === 'disconnected' || errorMsg.includes('disconnect')) {
+              errorMessage = 'Connection was lost. Please try again.';
+            } else if (errorType === 'invalid-id') {
+              errorMessage = 'Invalid game ID format. Please create a new game.';
+            } else if (errorType === 'unavailable-id') {
+              errorMessage = 'This game ID is already in use. Please try another ID.';
             }
             
             setError(errorMessage);
+            setConnectionStatus('failed');
+          }
+        });
+        
+      } catch (error) {
+        console.error('Error initializing PeerJS:', error);
+        
+        // Try another attempt if an exception occurred
+        if (reconnectAttempts < maxReconnectAttempts - 1) {
+          setConnectionStatus('retrying');
+          setTimeout(() => {
+            setReconnectAttempts(prev => prev + 1);
+            initPeer();
+          }, 1500);
+        } else {
+          setConnectionStatus('failed');
+          setError(`Could not initialize connection: ${(error as Error).message || 'Unknown error'}`);
+        }
+      }
+    };
+  
+    initPeer();
+    
+    // Clean up on component unmount
+    return () => {
+      if (connectionTimeout) {
+        clearTimeout(connectionTimeout);
+      }
+    };
+  }, [isClient, isHost, gameId, setupConnectionHandlers, reconnectAttempts, maxReconnectAttempts, gameState]);
+
+  // For the guest (joinee), establish connection to host
+  useEffect(() => {
+    if (!isClient || isHost || !peer) return;
+
+    // Check if already connected
+    if (opponentConnected) return;
+
+    // Clear any previous error if we're retrying
+    if (error) setError(null);
+    
+    // Prevent repeated connection attempts
+    if (connectionStatus !== 'connecting') return;
+    
+    let connectionTimeout: NodeJS.Timeout | null = null;
+    let retryTimeout: NodeJS.Timeout | null = null;
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    const attemptConnection = () => {
+      try {
+        console.log(`Guest attempting to connect to host: ${gameId}`);
+        
+        // Set a timeout for this connection attempt
+        connectionTimeout = setTimeout(() => {
+          if (!opponentConnected) {
+            console.log('Connection attempt timed out');
             
-            // Try to reconnect if we haven't exceeded maxRetries
             if (retryCount < maxRetries) {
               retryCount++;
               setConnectionStatus('retrying');
-              console.log(`Connection failed, retrying (${retryCount}/${maxRetries})...`);
-              retryTimeout = setTimeout(() => {
-                attemptConnection();
-              }, 2000); // Wait 2 seconds before retrying
+              console.log(`Connection timed out, retrying (${retryCount}/${maxRetries})...`);
+              // Increase delay with each retry
+              const retryDelay = 2000 + (retryCount * 500);
+              retryTimeout = setTimeout(attemptConnection, retryDelay);
             } else {
               setConnectionStatus('failed');
+              setError('Could not connect to host. The game may have ended or the host is offline.');
             }
-          });
-  
-          // Set connection with better error handling
-          connection.on('close', () => {
-            console.log('Connection closed');
-            setOpponentConnected(false);
-            setError('Connection to host closed');
-            setConnectionStatus('failed');
-          });
+          }
+        }, 8000); // Reduced timeout for faster feedback
+        
+        // Connect to the host
+        const connection = peer.connect(gameId, {
+          reliable: true
+        });
+        
+        // Handle connection open
+        connection.on('open', () => {
+          console.log('Connection established with host');
+          if (connectionTimeout) clearTimeout(connectionTimeout);
           
-          setConn(connection);
-        } catch (err) {
-          console.error('Failed to connect:', err);
-          setError(`Failed to connect to game host: ${(err as Error).message || 'Unknown error'}`);
+          setOpponentConnected(true);
+          setConnectionStatus('connected');
+          setupConnectionHandlers(connection);
+          
+          // Welcome message for guest
+          setChatMessages([{
+            text: "Connected to host. You can now chat with your opponent!",
+            sender: "system",
+            timestamp: Date.now()
+          }]);
+        });
+        
+        // Handle connection error
+        connection.on('error', (err) => {
+          console.error('Connection error:', err);
+          
+          // Provide more user-friendly error messages based on error type
+          let errorMessage = 'Failed to connect to host.';
+          
+          // Handle different error types in a more type-safe way
+          const errorType = (err as PeerJSError)?.type || '';
+          const errorMsg = (err as PeerJSError)?.message || '';
+          
+          if (errorType === 'peer-unavailable' || errorMsg.includes('Could not connect to peer')) {
+            errorMessage = 'Host not found. The game may have ended or the host is offline.';
+          } else if (errorType === 'disconnected' || errorMsg.includes('disconnect')) {
+            errorMessage = 'Connection lost. The host may have left the game.';
+          } else if (errorType === 'network' || errorType === 'server-error' || 
+                     errorMsg.includes('network') || errorMsg.includes('server')) {
+            errorMessage = 'Network or server error. Please check your internet connection and try again.';
+          }
+          
+          setError(errorMessage);
           
           // Try to reconnect if we haven't exceeded maxRetries
           if (retryCount < maxRetries) {
             retryCount++;
             setConnectionStatus('retrying');
             console.log(`Connection failed, retrying (${retryCount}/${maxRetries})...`);
-            retryTimeout = setTimeout(() => {
-              attemptConnection();
-            }, 2000); // Wait 2 seconds before retrying
+            retryTimeout = setTimeout(attemptConnection, 2000);
           } else {
             setConnectionStatus('failed');
           }
+        });
+  
+        // Set connection with better error handling
+        connection.on('close', () => {
+          console.log('Connection closed');
+          setOpponentConnected(false);
+          setError('Connection to host closed');
+          setConnectionStatus('failed');
+        });
+        
+        setConn(connection);
+      } catch (err) {
+        console.error('Failed to connect:', err);
+        setError(`Failed to connect to game host: ${(err as Error).message || 'Unknown error'}`);
+        
+        // Try to reconnect if we haven't exceeded maxRetries
+        if (retryCount < maxRetries) {
+          retryCount++;
+          setConnectionStatus('retrying');
+          console.log(`Connection failed, retrying (${retryCount}/${maxRetries})...`);
+          retryTimeout = setTimeout(attemptConnection, 2000);
+        } else {
+          setConnectionStatus('failed');
         }
-      };
-      
-      // Start connection attempt
-      attemptConnection();
-      
-      // Clean up on unmount
-      return () => {
-        if (retryTimeout) clearTimeout(retryTimeout);
-        if (connectionTimeout) clearTimeout(connectionTimeout);
-      };
-    }
-  }, [isHost, peer, gameId, isClient, setupConnectionHandlers, connectionStatus]);
+      }
+    };
+    
+    // Start connection attempt
+    attemptConnection();
+    
+    // Clean up on unmount
+    return () => {
+      if (retryTimeout) clearTimeout(retryTimeout);
+      if (connectionTimeout) clearTimeout(connectionTimeout);
+    };
+  }, [isHost, peer, gameId, isClient, setupConnectionHandlers, connectionStatus, error, opponentConnected]);
   
   // Handle a player's move
   const handleCellClick = (position: number) => {
@@ -520,7 +555,7 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
       case 'connecting':
         return isHost ? 'Waiting for opponent to join...' : 'Connecting to game host...';
       case 'retrying':
-        return 'Connection failed, retrying...';
+        return `Connection attempt failed, retrying... (Attempt ${reconnectAttempts + 1}/${maxReconnectAttempts})`;
       case 'failed':
         return `Connection failed: ${error || 'Unknown error'}`;
       default:
@@ -538,13 +573,19 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
       <div className="flex flex-col items-center justify-center min-h-[60vh] p-6">
         <div className="max-w-md w-full bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
           <h2 className="text-2xl font-bold mb-4">
-            {connectionStatus === 'failed' ? 'Connection Failed' : 'Connecting'}
+            {connectionStatus === 'failed' ? 'Connection Failed' : 
+             connectionStatus === 'retrying' ? 'Retrying Connection' : 'Connecting'}
           </h2>
           
           {connectionStatus !== 'failed' && (
             <div className="mb-4">
               <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
               <p className="text-gray-600 dark:text-gray-300">{getConnectionStatusMessage()}</p>
+              {connectionStatus === 'retrying' && (
+                <p className="text-sm text-yellow-600 dark:text-yellow-400 mt-2">
+                  Having trouble connecting. Please check your internet connection.
+                </p>
+              )}
             </div>
           )}
           
@@ -560,18 +601,16 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
                 </button>
                 <button
                   onClick={handleLeaveGame}
-                  className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                  className="px-4 py-2 bg-white border border-indigo-600 text-indigo-600 rounded hover:bg-indigo-50 transition-colors"
                 >
-                  Back to Home
+                  Return to Home
                 </button>
+                <p className="text-sm text-gray-500 mt-3 px-4">
+                  If you continue to have issues, try using a different device or network.
+                </p>
               </div>
             </>
           )}
-          
-          <div className="mt-6 text-sm text-gray-500">
-            <p>Game ID: {gameId}</p>
-            <p>Role: {isHost ? 'Host (X)' : 'Guest (O)'}</p>
-          </div>
         </div>
       </div>
     );
