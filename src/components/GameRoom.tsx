@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import GameBoard from './GameBoard';
 import GameStatus from './GameStatus';
 import { GameState, createNewGame, makeMove } from '@/lib/gameUtils';
@@ -49,29 +49,62 @@ const peerConfig = {
 
 export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps) {
   const [gameState, setGameState] = useState<GameState>(createNewGame());
-  const [peer, setPeer] = useState<PeerType | null>(null);
   const [conn, setConn] = useState<DataConnection | null>(null);
+  const [peer, setPeer] = useState<PeerType | null>(null);
   const [opponentConnected, setOpponentConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const playerSymbol = isHost ? 'X' : 'O';
+  const [messageInput, setMessageInput] = useState('');
+  const [chatMessages, setChatMessages] = useState<{text: string, sender: string, timestamp: number}[]>([]);
+  const [showChat, setShowChat] = useState(true);
   const [isClient, setIsClient] = useState(false);
   
-  // Chat state
-  const [chatMessages, setChatMessages] = useState<{ text: string; sender: string; timestamp: number }[]>([]);
-  const [messageInput, setMessageInput] = useState('');
-  const [showChat, setShowChat] = useState(true);
+  // Ref for auto-scrolling chat
+  const chatContainerRef = useRef<HTMLDivElement>(null);
   
-  // Player symbol is X for host, O for guest
-  const playerSymbol = isHost ? 'X' : 'O';
+  // For SSR compatibility
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
   
-  // Reference for chat container to auto-scroll
-  const chatContainerRef = React.useRef<HTMLDivElement>(null);
-  
-  // Auto-scroll to the latest message when messages change
+  // Auto-scroll to bottom of chat when messages change
   useEffect(() => {
     if (chatContainerRef.current) {
       chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
     }
   }, [chatMessages]);
+  
+  // Setup connection event handlers
+  const setupConnectionHandlers = useCallback((connection: DataConnection) => {
+    // Use type assertion for the data to handle the PeerJS DataConnection type constraints
+    connection.on('data', (data) => {
+      const message = data as GameMessage;
+      
+      // Handle different message types
+      if (message.type === 'gameState' && message.gameState) {
+        setGameState(message.gameState);
+      }
+      else if (message.type === 'move' && typeof message.position === 'number') {
+        handleOpponentMove(message.position);
+      }
+      else if (message.type === 'resetGame') {
+        setGameState(createNewGame());
+      }
+      else if (message.type === 'chatMessage' && message.chatMessage) {
+        setChatMessages(prev => [...prev, message.chatMessage!]);
+      }
+    });
+
+    connection.on('close', () => {
+      setOpponentConnected(false);
+      setError('Opponent disconnected');
+    });
+  }, []);
+  
+  // Handle opponent's move
+  const handleOpponentMove = useCallback((position: number) => {
+    setGameState(currentState => makeMove(currentState, position));
+  }, []);
 
   // Initialize client-side state
   useEffect(() => {
@@ -171,35 +204,8 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         setError(`Failed to connect to game host: ${(err as Error).message || 'Unknown error'}`);
       }
     }
-  }, [isHost, peer, gameId, isClient]);
+  }, [isHost, peer, gameId, isClient, setupConnectionHandlers]);
   
-  // Setup connection event handlers
-  const setupConnectionHandlers = (connection: DataConnection) => {
-    // Use type assertion for the data to handle the PeerJS DataConnection type constraints
-    connection.on('data', (data) => {
-      const message = data as GameMessage;
-      
-      // Handle different message types
-      if (message.type === 'gameState' && message.gameState) {
-        setGameState(message.gameState);
-      }
-      else if (message.type === 'move' && typeof message.position === 'number') {
-        handleOpponentMove(message.position);
-      }
-      else if (message.type === 'resetGame') {
-        setGameState(createNewGame());
-      }
-      else if (message.type === 'chatMessage' && message.chatMessage) {
-        setChatMessages(prev => [...prev, message.chatMessage!]);
-      }
-    });
-
-    connection.on('close', () => {
-      setOpponentConnected(false);
-      setError('Opponent disconnected');
-    });
-  };
-
   // Handle a player's move
   const handleCellClick = (position: number) => {
     if (!opponentConnected) return;
@@ -221,11 +227,6 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         position
       });
     }
-  };
-
-  // Handle opponent's move
-  const handleOpponentMove = (position: number) => {
-    setGameState(currentState => makeMove(currentState, position));
   };
 
   // Reset the game

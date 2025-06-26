@@ -135,7 +135,7 @@ const GameBoard: React.FC<GameBoardProps> = ({ gameState, isMyTurn, onCellClick 
         <div className="game-over-overlay">
           <div className="game-over-content">
             {gameState.winner === 'draw' ? (
-              <span className="text-yellow-500">It's a Draw!</span>
+              <span className="text-yellow-500">It&apos;s a Draw!</span>
             ) : (
               <span className={`${gameState.winner === 'X' ? 'text-red-500' : 'text-blue-500'}`}>
                 {gameState.winner} Wins!
