@@ -1,0 +1,11 @@
+{
+  "name": "tic-tac-toe-multiplayer",
+  "version": 2,
+  "public": true,
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/next"
+    }
+  ]
+} 
