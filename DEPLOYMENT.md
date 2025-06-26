@@ -13,7 +13,7 @@ To deploy this Multiplayer Tic Tac Toe game, follow these steps:
 
 2. Push your local repository to GitHub:
    ```bash
-   git remote add origin https://github.com/YOUR_USERNAME/multiplayer-tictactoe.git
+   git remote add origin https://github.com/HaedarWinter/tictac.git
    git push -u origin main
    ```
 
@@ -22,7 +22,7 @@ To deploy this Multiplayer Tic Tac Toe game, follow these steps:
    - Click "Settings" > "Pages"
    - Under "Branch", select "main" and select either root or "/docs" folder
    - Click "Save"
-   - Your site will be published at `https://YOUR_USERNAME.github.io/multiplayer-tictactoe/`
+   - Your site will be published at `https://haedarwinter.github.io/tictac/`
 
 4. Alternatively, you can use GitHub Actions:
    - The `.github/workflows/nextjs.yml` file is already created for you

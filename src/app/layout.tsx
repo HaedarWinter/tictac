@@ -66,7 +66,7 @@ export default function RootLayout({
                 </button>
 
                 <a 
-                  href="https://github.com/HaedarWinter/multiplayer-tictactoe"
+                  href="https://github.com/HaedarWinter/tictac"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-gray-700 dark:text-gray-300 hover:text-indigo-600 dark:hover:text-indigo-400"

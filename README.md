@@ -30,8 +30,8 @@ A real-time multiplayer Tic Tac Toe game built with Next.js, PeerJS, and WebSock
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/multiplayer-tictactoe.git
-   cd multiplayer-tictactoe
+   git clone https://github.com/HaedarWinter/tictac.git
+   cd tictac
    ```
 
 2. Install dependencies:
