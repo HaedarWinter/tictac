@@ -5,6 +5,7 @@ export interface GameState {
   winner: string | null;
   isDraw: boolean;
   gameOver: boolean;
+  winningLine: number[] | null;
 }
 
 // Create a new game state
@@ -14,12 +15,13 @@ export function createNewGame(): GameState {
     currentPlayer: 'X',
     winner: null,
     isDraw: false,
-    gameOver: false
+    gameOver: false,
+    winningLine: null
   };
 }
 
-// Check for a winner
-export function checkWinner(board: Array<string | null>): string | null {
+// Check for a winner and return winning line if found
+export function checkWinner(board: Array<string | null>): { winner: string | null; winningLine: number[] | null } {
   const winPatterns = [
     [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
     [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
@@ -29,11 +31,14 @@ export function checkWinner(board: Array<string | null>): string | null {
   for (const pattern of winPatterns) {
     const [a, b, c] = pattern;
     if (board[a] && board[a] === board[b] && board[a] === board[c]) {
-      return board[a] as string;
+      return { 
+        winner: board[a] as string,
+        winningLine: pattern
+      };
     }
   }
 
-  return null;
+  return { winner: null, winningLine: null };
 }
 
 // Check if the game is a draw
@@ -53,7 +58,7 @@ export function makeMove(game: GameState, position: number): GameState {
   newBoard[position] = game.currentPlayer;
 
   // Check for winner
-  const winner = checkWinner(newBoard);
+  const { winner, winningLine } = checkWinner(newBoard);
   const isDraw = !winner && checkDraw(newBoard);
   const gameOver = !!winner || isDraw;
 
@@ -63,6 +68,7 @@ export function makeMove(game: GameState, position: number): GameState {
     currentPlayer: game.currentPlayer === 'X' ? 'O' : 'X',
     winner,
     isDraw,
-    gameOver
+    gameOver,
+    winningLine
   };
 } 
