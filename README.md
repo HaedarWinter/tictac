@@ -91,6 +91,23 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## Environment Variables
+
+Aplikasi ini membutuhkan beberapa environment variable untuk koneksi PeerJS dan WebSocket. Buat file `.env.local` dengan isi sebagai berikut:
+
+```bash
+# PeerJS Configuration - menggunakan server publik
+NEXT_PUBLIC_PEERJS_HOST=0.peerjs.com
+NEXT_PUBLIC_PEERJS_PORT=443
+NEXT_PUBLIC_PEERJS_PATH=/
+NEXT_PUBLIC_PEERJS_SECURE=true
+
+# WebSocket URL - menggunakan server WebSocket Next.js
+NEXT_PUBLIC_WEBSOCKET_URL=wss://tictac-omega.vercel.app/api/socket
+```
+
+Jika Anda men-deploy aplikasi ini, pastikan untuk mengatur environment variable yang sama di platform hosting Anda.
+
 ---
 
 Enjoy the game! 🎮
