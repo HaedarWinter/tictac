@@ -74,6 +74,11 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
     }
   }, [chatMessages]);
   
+  // Handle opponent's move
+  const handleOpponentMove = useCallback((position: number) => {
+    setGameState(currentState => makeMove(currentState, position));
+  }, []);
+
   // Setup connection event handlers
   const setupConnectionHandlers = useCallback((connection: DataConnection) => {
     // Use type assertion for the data to handle the PeerJS DataConnection type constraints
@@ -99,12 +104,7 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
       setOpponentConnected(false);
       setError('Opponent disconnected');
     });
-  }, []);
-  
-  // Handle opponent's move
-  const handleOpponentMove = useCallback((position: number) => {
-    setGameState(currentState => makeMove(currentState, position));
-  }, []);
+  }, [handleOpponentMove]);
 
   // Initialize client-side state
   useEffect(() => {
@@ -160,7 +160,7 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
     };
 
     initPeer();
-  }, [isClient]);
+  }, [isClient, isHost, gameId, setupConnectionHandlers]);
 
   // For the guest (joinee), establish connection to host
   useEffect(() => {

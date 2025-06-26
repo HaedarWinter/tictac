@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import GameSetup from '../components/GameSetup';
 import GameRoom from '../components/GameRoom';
 import { v4 as uuidv4 } from 'uuid';
 
-export default function Home() {
+function GameContent() {
   const [gameId, setGameId] = useState<string | null>(null);
   const [isHost, setIsHost] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -15,7 +15,7 @@ export default function Home() {
   // Initialize from URL param if available (for direct links)
   useEffect(() => {
     setIsLoading(true);
-    const gameIdFromUrl = searchParams.get('gameId');
+    const gameIdFromUrl = searchParams?.get('gameId') || null;
     
     if (gameIdFromUrl) {
       setGameId(gameIdFromUrl);
@@ -85,5 +85,20 @@ export default function Home() {
         />
       )}
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={
+      <div className="flex justify-center items-center min-h-[60vh]">
+        <div className="loading-spinner">
+          <div className="w-16 h-16 border-4 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+          <p className="mt-4 text-gray-600 dark:text-gray-300">Loading game...</p>
+        </div>
+      </div>
+    }>
+      <GameContent />
+    </Suspense>
   );
 }
