@@ -4,7 +4,6 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import GameSetup from '../components/GameSetup';
 import GameRoom from '../components/GameRoom';
-import { v4 as uuidv4 } from 'uuid';
 
 function GameContent() {
   const [gameId, setGameId] = useState<string | null>(null);
@@ -27,7 +26,8 @@ function GameContent() {
 
   // Handle creating a new game
   const handleCreateGame = () => {
-    const newGameId = uuidv4().substring(0, 8);
+    // Create a shorter, more reliable game ID (alphanumeric only)
+    const newGameId = Math.random().toString(36).substring(2, 10);
     setGameId(newGameId);
     setIsHost(true);
     

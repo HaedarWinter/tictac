@@ -30,19 +30,23 @@ interface GameMessage {
 const peerConfig = {
   // Use PeerJS cloud service - no specific host
   debug: 1, // Minimal debug for better performance
+  secure: true, // Use secure connections
+  host: 'peerjs-server.herokuapp.com', // Use a more reliable server
+  port: 443,
+  path: '/',
   config: {
     iceServers: [
       // Google's public STUN servers
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
       
-      // Public TURN servers for NAT traversal
+      // Free TURN servers (Google)
       {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
+        urls: 'turn:numb.viagenie.ca',
+        username: 'webrtc@live.com',
+        credential: 'muazkh'
       },
+      // Backup TURN servers
       {
         urls: 'turn:openrelay.metered.ca:443',
         username: 'openrelayproject',
@@ -278,20 +282,36 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
             
             // Clean up
             if (newPeer && !newPeer.destroyed) {
-              newPeer.destroy();
+              try {
+                newPeer.destroy();
+              } catch (err) {
+                console.error('Error destroying peer:', err);
+              }
             }
             
+            // Exponential backoff for retry
+            const retryDelay = Math.min(1500 * Math.pow(1.5, reconnectAttempts), 8000);
             setTimeout(() => {
               setReconnectAttempts(prev => prev + 1);
               initPeer();
-            }, 1500);
+            }, retryDelay);
           } else {
             // Format a user-friendly error message
             let errorMessage = 'Connection failed.';
             const errorType = (err as PeerJSError)?.type || '';
             const errorMsg = (err as PeerJSError)?.message || '';
             
-            if (errorType === 'network' || errorType === 'server-error' || 
+            console.log('Error details:', { type: errorType, message: errorMsg });
+            
+            if (errorMsg.includes('Could not connect to peer') || errorType === 'peer-unavailable') {
+              // This is the most common error - the peer ID doesn't exist or can't be reached
+              errorMessage = 'Could not connect to game. The host may be offline or behind a restrictive firewall.';
+              
+              // For hosts, this is likely a server connection issue
+              if (isHost) {
+                errorMessage = 'Could not establish connection with the PeerJS server. Please try again.';
+              }
+            } else if (errorType === 'network' || errorType === 'server-error' || 
                 errorMsg.includes('server') || errorMsg.includes('network')) {
               errorMessage = 'Network or server error. Please check your internet connection and try again.';
             } else if (errorType === 'browser-incompatible') {
@@ -377,9 +397,11 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           }
         }, 8000); // Reduced timeout for faster feedback
         
-        // Connect to the host
+        // Connect to the host with additional options
         const connection = peer.connect(gameId, {
-          reliable: true
+          reliable: true,
+          serialization: 'json', // Explicitly use JSON serialization
+          metadata: { playerSymbol }
         });
         
         // Handle connection open
@@ -410,8 +432,10 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           const errorType = (err as PeerJSError)?.type || '';
           const errorMsg = (err as PeerJSError)?.message || '';
           
+          console.log('Guest connection error details:', { type: errorType, message: errorMsg });
+          
           if (errorType === 'peer-unavailable' || errorMsg.includes('Could not connect to peer')) {
-            errorMessage = 'Host not found. The game may have ended or the host is offline.';
+            errorMessage = 'Host not found. The game ID may be incorrect or the host is offline.';
           } else if (errorType === 'disconnected' || errorMsg.includes('disconnect')) {
             errorMessage = 'Connection lost. The host may have left the game.';
           } else if (errorType === 'network' || errorType === 'server-error' || 
@@ -426,7 +450,9 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
             retryCount++;
             setConnectionStatus('retrying');
             console.log(`Connection failed, retrying (${retryCount}/${maxRetries})...`);
-            retryTimeout = setTimeout(attemptConnection, 2000);
+            // Exponential backoff for retry
+            const retryDelay = Math.min(2000 * Math.pow(1.5, retryCount), 8000);
+            retryTimeout = setTimeout(attemptConnection, retryDelay);
           } else {
             setConnectionStatus('failed');
           }
