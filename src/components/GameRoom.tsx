@@ -467,7 +467,133 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
             currentAttempt.error = (err as PeerJSError)?.type || (err as Error)?.message || 'Unknown error';
           }
           
-          // Try another attempt if connection failed
+          // Extract error details for better handling
+          const errorType = (err as PeerJSError)?.type || '';
+          const errorMsg = (err as PeerJSError)?.message || '';
+          
+          console.log('Detailed PeerJS error:', { 
+            type: errorType, 
+            message: errorMsg,
+            reconnectAttempts,
+            maxReconnectAttempts,
+            peerConnected,
+            connectionStatus
+          });
+          
+          // Specific handling based on error type
+          if (errorType === 'peer-unavailable' || errorMsg.includes('Could not connect to peer')) {
+            // For host, this usually means server connection issues
+            if (isHost) {
+              console.log('Host received peer-unavailable error, trying different server');
+              
+              // Try a completely different server immediately
+              if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
+                // Skip to next server configuration
+                const nextAttempt = reconnectAttempts + 1;
+                setReconnectAttempts(nextAttempt);
+                
+                // Clean up
+                if (newPeer && !newPeer.destroyed) {
+                  try {
+                    newPeer.destroy();
+                  } catch (err) {
+                    console.error('Error destroying peer:', err);
+                  }
+                }
+                
+                // Retry immediately with next server
+                setTimeout(initPeer, 500);
+                return;
+              }
+            }
+          } else if (errorType === 'network' || errorType === 'server-error') {
+            console.log('Network or server error, will retry with exponential backoff');
+            // These errors benefit from a longer wait before retry
+            if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
+              setConnectionStatus('retrying');
+              
+              // Clean up
+              if (newPeer && !newPeer.destroyed) {
+                try {
+                  newPeer.destroy();
+                } catch (err) {
+                  console.error('Error destroying peer:', err);
+                }
+              }
+              
+              // Longer exponential backoff for network issues
+              const retryDelay = Math.min(2500 * Math.pow(1.8, reconnectAttempts), 15000);
+              setTimeout(() => {
+                setReconnectAttempts(prev => prev + 1);
+                initPeer();
+              }, retryDelay);
+              return;
+            }
+          } else if (errorType === 'disconnected') {
+            console.log('Peer disconnected, attempting reconnect');
+            // Try to reconnect if the peer was disconnected
+            if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
+              setConnectionStatus('retrying');
+              
+              // Try to reconnect to the signaling server
+              try {
+                newPeer.reconnect();
+                
+                // Set a timeout to check if reconnect was successful
+                setTimeout(() => {
+                  if (!peerConnected && isMountedRef.current) {
+                    // If still not connected, destroy and recreate
+                    console.log('Reconnect attempt failed, recreating peer');
+                    
+                    // Clean up
+                    if (newPeer && !newPeer.destroyed) {
+                      try {
+                        newPeer.destroy();
+                      } catch (err) {
+                        console.error('Error destroying peer:', err);
+                      }
+                    }
+                    
+                    // Increment and retry
+                    setReconnectAttempts(prev => prev + 1);
+                    setTimeout(initPeer, 1000);
+                  }
+                }, 5000);
+                return;
+              } catch (err) {
+                console.error('Failed to reconnect:', err);
+              }
+            }
+          } else if (errorType === 'browser-incompatible') {
+            // This is a terminal error - the browser doesn't support WebRTC
+            console.error('Browser incompatible with WebRTC');
+            setConnectionStatus('failed');
+            setError('Your browser does not fully support WebRTC. Please try a different browser, such as Chrome or Firefox.');
+            return;
+          } else if (errorType === 'invalid-id' || errorType === 'invalid-key') {
+            // These are configuration errors
+            console.error('Invalid ID or key error');
+            if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
+              // Try a completely different configuration
+              const nextAttempt = Math.floor(reconnectAttempts / peerConfigs.length + 1) * peerConfigs.length;
+              setReconnectAttempts(Math.min(nextAttempt, maxReconnectAttempts - 1));
+              
+              // Clean up
+              if (newPeer && !newPeer.destroyed) {
+                try {
+                  newPeer.destroy();
+                } catch (err) {
+                  console.error('Error destroying peer:', err);
+                }
+              }
+              
+              // Try with new configuration
+              setTimeout(initPeer, 1000);
+              return;
+            }
+          }
+          
+          // Default retry logic for other errors or if specific handling didn't return
           if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
             console.log(`Connection attempt failed, retrying...`);
             setConnectionStatus('retrying');
@@ -490,8 +616,6 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           } else {
             // Format a user-friendly error message
             let errorMessage = 'Connection failed.';
-            const errorType = (err as PeerJSError)?.type || '';
-            const errorMsg = (err as PeerJSError)?.message || '';
             
             console.log('Error details:', { type: errorType, message: errorMsg });
             
@@ -687,8 +811,15 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           const errorType = (err as PeerJSError)?.type || '';
           const errorMsg = (err as PeerJSError)?.message || '';
           
-          console.log('Guest connection error details:', { type: errorType, message: errorMsg });
+          console.log('Guest connection error details:', { 
+            type: errorType, 
+            message: errorMsg,
+            retryCount,
+            maxRetries,
+            connectionStatus
+          });
           
+          // Different handling strategies based on error type
           if (errorType === 'peer-unavailable' || errorMsg.includes('Could not connect to peer')) {
             errorMessage = 'Host not found. The game ID may be incorrect or the host is offline.';
             
@@ -703,17 +834,61 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
               if (connectionTimeout) clearTimeout(connectionTimeout);
               retryTimeout = setTimeout(attemptConnection, 1000);
               return;
+            } else if (retryCount < maxRetries - 1) {
+              // On subsequent attempts, try with a different peer ID format
+              // Sometimes adding a suffix can help
+              console.log('Trying with modified peer ID format');
+              retryCount++;
+              setConnectionStatus('retrying');
+              
+              // Destroy current peer and create a new one with different ID
+              if (peer && !peer.destroyed) {
+                try {
+                  peer.destroy();
+                } catch (err) {
+                  console.error('Error destroying peer:', err);
+                }
+              }
+              
+              // This will trigger a new peer creation in the parent effect
+              setPeer(null);
+              
+              if (connectionTimeout) clearTimeout(connectionTimeout);
+              retryTimeout = setTimeout(() => {
+                // This will re-trigger the connection attempt with a new peer
+                setConnectionStatus('connecting');
+              }, 2000);
+              return;
             }
           } else if (errorType === 'disconnected' || errorMsg.includes('disconnect')) {
             errorMessage = 'Connection lost. The host may have left the game.';
+            
+            // Try reconnecting with a delay
+            if (retryCount < maxRetries) {
+              retryCount++;
+              setConnectionStatus('retrying');
+              console.log(`Connection lost, attempting to reconnect (${retryCount}/${maxRetries})...`);
+              retryTimeout = setTimeout(attemptConnection, 3000);
+              return;
+            }
           } else if (errorType === 'network' || errorType === 'server-error' || 
                      errorMsg.includes('network') || errorMsg.includes('server')) {
             errorMessage = 'Network or server error. Please check your internet connection and try again.';
+            
+            // Network errors benefit from longer delays between retries
+            if (retryCount < maxRetries) {
+              retryCount++;
+              setConnectionStatus('retrying');
+              console.log(`Network error, retrying with longer delay (${retryCount}/${maxRetries})...`);
+              // Longer delay for network issues
+              retryTimeout = setTimeout(attemptConnection, 4000);
+              return;
+            }
           }
           
           setError(errorMessage);
           
-          // Try to reconnect if we haven't exceeded maxRetries
+          // Generic retry logic if specific handling didn't return
           if (retryCount < maxRetries) {
             retryCount++;
             setConnectionStatus('retrying');
