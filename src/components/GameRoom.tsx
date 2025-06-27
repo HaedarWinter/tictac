@@ -26,40 +26,42 @@ interface GameMessage {
   };
 }
 
-// PeerJS configuration
-const peerConfig = {
-  // Use PeerJS cloud service - no specific host
-  debug: 1, // Minimal debug for better performance
-  secure: true, // Use secure connections
-  host: 'peerjs-server.herokuapp.com', // Use a more reliable server
-  port: 443,
-  path: '/',
-  config: {
-    iceServers: [
-      // Google's public STUN servers
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      
-      // Free TURN servers (Google)
-      {
-        urls: 'turn:numb.viagenie.ca',
-        username: 'webrtc@live.com',
-        credential: 'muazkh'
-      },
-      // Backup TURN servers
-      {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
-    ]
+// PeerJS configuration options
+// We'll try multiple configurations if one fails
+const peerConfigs = [
+  // Option 1: Default PeerJS server with minimal config (most reliable)
+  {
+    debug: 1,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    }
+  },
+  
+  // Option 2: Custom server with more options
+  {
+    debug: 1,
+    secure: true,
+    host: 'peerjs.herokuapp.com', // Different server
+    port: 443,
+    path: '/',
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ]
+    }
   }
-};
+];
+
+// We'll select the config based on reconnect attempts
 
 // Add a helper function to validate gameId format
 const isValidPeerIdFormat = (id: string): boolean => {
@@ -168,8 +170,15 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         
         // Use the gameId as the peer ID for the host, or generate a random ID for guest
         const peerId = isHost ? gameId : Math.random().toString(36).substring(2, 15);
+        
+        // Select which configuration to use based on reconnect attempts
+        // This allows us to try different configurations if the first one fails
+        const configIndex = Math.min(reconnectAttempts, peerConfigs.length - 1);
+        const selectedConfig = peerConfigs[configIndex];
+        
         console.log(`Initializing peer with ID: ${peerId} (${isHost ? 'host' : 'guest'})`);
-        console.log(`Using cloud server with retry attempt ${reconnectAttempts + 1}/${maxReconnectAttempts}`);
+        console.log(`Using config #${configIndex + 1} with retry attempt ${reconnectAttempts + 1}/${maxReconnectAttempts}`);
+        console.log('Selected config:', selectedConfig);
         
         setConnectionStatus('connecting');
         
@@ -177,8 +186,8 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         const userAgent = navigator.userAgent as string;
         const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
         
-        // Create a copy of the peer config we can modify
-        const currentPeerConfig = JSON.parse(JSON.stringify(peerConfig));
+        // Create a copy of the selected peer config we can modify
+        const currentPeerConfig = JSON.parse(JSON.stringify(selectedConfig));
         
         if (isMobile) {
           console.log('Mobile device detected, optimizing PeerJS config');
@@ -203,9 +212,11 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           currentPeerConfig.debug = 0; // Reduce debug logging on mobile to improve performance
         }
         
-        // Initialize PeerJS connection using cloud server (no host specified)
         // Add a random value to avoid ID conflicts on reconnection attempts
         const peerIdWithSuffix = reconnectAttempts > 0 ? `${peerId}-${Date.now().toString().slice(-4)}` : peerId;
+        
+        // Initialize PeerJS with the selected configuration
+        console.log(`Creating peer with ID ${peerIdWithSuffix}`);
         const newPeer = new Peer(peerIdWithSuffix, currentPeerConfig);
         
         // Track if the peer connection was successful
@@ -376,7 +387,13 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
     
     const attemptConnection = () => {
       try {
+        // Select which configuration to use based on retry count
+        const configIndex = Math.min(retryCount, peerConfigs.length - 1);
+        const selectedConfig = peerConfigs[configIndex];
+        
         console.log(`Guest attempting to connect to host: ${gameId}`);
+        console.log(`Using config #${configIndex + 1} with retry attempt ${retryCount + 1}/${maxRetries}`);
+        console.log('Selected config:', selectedConfig);
         
         // Set a timeout for this connection attempt
         connectionTimeout = setTimeout(() => {
@@ -397,11 +414,18 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           }
         }, 8000); // Reduced timeout for faster feedback
         
+        // Using the selected config for this connection attempt
+        
         // Connect to the host with additional options
+        console.log(`Connecting to host ${gameId} with config #${configIndex + 1}`);
         const connection = peer.connect(gameId, {
           reliable: true,
           serialization: 'json', // Explicitly use JSON serialization
-          metadata: { playerSymbol }
+          metadata: { 
+            playerSymbol,
+            configIndex,
+            timestamp: Date.now()
+          }
         });
         
         // Handle connection open
