@@ -58,6 +58,31 @@ const peerConfigs = [
         }
       ]
     }
+  },
+  
+  // Option 3: More TURN servers for better NAT traversal
+  {
+    debug: 1,
+    secure: true,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ]
+    }
   }
 ];
 
@@ -75,16 +100,40 @@ const peerJSServers = [
     secure: true,
     port: 443,
     path: '/'
+  },
+  {
+    host: '0.peerjs.com',
+    secure: true,
+    port: 443,
+    path: '/'
   }
 ];
-
-// We'll select the config based on reconnect attempts
 
 // Add a helper function to validate gameId format
 const isValidPeerIdFormat = (id: string): boolean => {
   // PeerJS ID should be alphanumeric and reasonable length
   // Accept UUIDs and other common formats
   return /^[a-zA-Z0-9-_]{4,36}$/.test(id);
+};
+
+// Helper function to check if a peer ID is available
+const checkPeerIdAvailability = async (peerId: string): Promise<boolean> => {
+  try {
+    // Try to fetch peer info from PeerJS server
+    const response = await fetch(`https://peerjs.com/peerjs/peers/${peerId}`);
+    
+    // If we get a 200 OK, the peer exists
+    if (response.ok) {
+      return true;
+    }
+    
+    // For other responses, assume peer doesn't exist
+    return false;
+  } catch (error) {
+    console.error('Error checking peer availability:', error);
+    // If we can't check, assume it might be available
+    return true;
+  }
 };
 
 // Type for PeerJS errors
@@ -109,14 +158,29 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
   const chatContainerRef = useRef<HTMLDivElement>(null);
   
   // Connection status tracking
-  const [connectionStatus, setConnectionStatus] = useState<'initializing' | 'connecting' | 'connected' | 'failed' | 'retrying'>('initializing');
+  const [connectionStatus, setConnectionStatus] = useState<'initializing' | 'connecting' | 'connected' | 'failed' | 'retrying' | 'checking'>('initializing');
   
   // Maximum number of reconnection attempts
-  const maxReconnectAttempts = 5; // Increased from 3 to 5
+  const maxReconnectAttempts = 8; // Increased from 5 to 8 for more attempts
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   
   // Track if component is still mounted
   const isMountedRef = useRef(true);
+  
+  // Track connection attempts for analytics
+  const connectionAttemptsRef = useRef<{
+    startTime: number;
+    attempts: {
+      timestamp: number;
+      config: number;
+      server: number;
+      result: 'success' | 'timeout' | 'error';
+      error?: string;
+    }[];
+  }>({
+    startTime: Date.now(),
+    attempts: []
+  });
   
   // For SSR compatibility
   useEffect(() => {
@@ -229,6 +293,14 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         console.log(`Using config #${configIndex + 1} with server #${serverIndex + 1}, retry attempt ${reconnectAttempts + 1}/${maxReconnectAttempts}`);
         console.log('Selected config:', selectedConfig);
         
+        // Record this attempt
+        connectionAttemptsRef.current.attempts.push({
+          timestamp: Date.now(),
+          config: configIndex,
+          server: serverIndex,
+          result: 'timeout' // Default to timeout, will update if successful
+        });
+        
         setConnectionStatus('connecting');
         
         // Mobile optimization - detect if running on mobile
@@ -278,6 +350,13 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           
           if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
             console.log('Connection timed out, retrying...');
+            
+            // Update attempt record
+            const currentAttempt = connectionAttemptsRef.current.attempts[connectionAttemptsRef.current.attempts.length - 1];
+            if (currentAttempt) {
+              currentAttempt.result = 'timeout';
+            }
+            
             setConnectionStatus('retrying');
             setReconnectAttempts(prev => prev + 1);
             
@@ -294,6 +373,7 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
             const retryDelay = 1500 + (reconnectAttempts * 500);
             setTimeout(initPeer, retryDelay);
           } else if (!peerConnected) {
+            console.error('Connection timed out after all retries');
             setConnectionStatus('failed');
             setError('Failed to connect after multiple attempts. Please check your internet connection and try again.');
           }
@@ -304,6 +384,12 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           console.log('Peer connection established with ID:', id);
           peerConnected = true;
           setPeer(newPeer);
+          
+          // Update attempt record
+          const currentAttempt = connectionAttemptsRef.current.attempts[connectionAttemptsRef.current.attempts.length - 1];
+          if (currentAttempt) {
+            currentAttempt.result = 'success';
+          }
           
           // Clear the timeout since we're connected
           if (connectionTimeout) {
@@ -373,6 +459,13 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         // Handle errors
         newPeer.on('error', (err) => {
           console.error('PeerJS error:', err);
+          
+          // Update attempt record
+          const currentAttempt = connectionAttemptsRef.current.attempts[connectionAttemptsRef.current.attempts.length - 1];
+          if (currentAttempt) {
+            currentAttempt.result = 'error';
+            currentAttempt.error = (err as PeerJSError)?.type || (err as Error)?.message || 'Unknown error';
+          }
           
           // Try another attempt if connection failed
           if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
@@ -481,9 +574,9 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
     let connectionTimeout: NodeJS.Timeout | null = null;
     let retryTimeout: NodeJS.Timeout | null = null;
     let retryCount = 0;
-    const maxRetries = 3;
+    const maxRetries = 5; // Increased from 3 to 5
     
-    const attemptConnection = () => {
+    const attemptConnection = async () => {
       try {
         // Validate the gameId before attempting to connect
         if (!isValidPeerIdFormat(gameId)) {
@@ -492,6 +585,19 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           setError('Invalid game ID format. Please check the game ID and try again.');
           return;
         }
+        
+        // Check if the peer ID might be available
+        setConnectionStatus('checking');
+        console.log(`Checking if peer ID ${gameId} is available...`);
+        
+        const isPeerAvailable = await checkPeerIdAvailability(gameId);
+        if (!isPeerAvailable && retryCount === 0) {
+          console.log(`Peer ID ${gameId} appears to be unavailable, but will try to connect anyway`);
+          // We'll still try to connect, but we'll show a warning
+          setError(`Warning: Game with ID ${gameId} may not exist. Attempting connection anyway...`);
+        }
+        
+        setConnectionStatus('connecting');
         
         // Select which configuration to use based on retry count
         const configIndex = Math.min(retryCount, peerConfigs.length - 1);
@@ -512,18 +618,14 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
               console.log(`Connection timed out, retrying (${retryCount}/${maxRetries})...`);
               // Increase delay with each retry
               const retryDelay = 2000 + (retryCount * 500);
-              retryTimeout = setTimeout(attemptConnection, retryDelay);
+              retryTimeout = setTimeout(() => attemptConnection(), retryDelay);
             } else {
+              console.error('Connection timed out after all retries');
               setConnectionStatus('failed');
               setError('Could not connect to host. The game may have ended or the host is offline.');
             }
           }
-        }, 8000); // Reduced timeout for faster feedback
-        
-        // Using the selected config for this connection attempt
-        
-        // Connect to the host with additional options
-        console.log(`Connecting to host ${gameId} with config #${configIndex + 1}`);
+        }, 10000); // Increased timeout for more reliable connection
         
         // Check if peer is valid before connecting
         if (!peer || peer.destroyed) {
@@ -533,13 +635,20 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           return;
         }
         
+        // Try different connection options based on retry count
+        const reliable = true;
+        const serialization = 'json';
+        
+        // Connect to the host with additional options
+        console.log(`Connecting to host ${gameId} with config #${configIndex + 1}`);
         const connection = peer.connect(gameId, {
-          reliable: true,
-          serialization: 'json', // Explicitly use JSON serialization
+          reliable,
+          serialization,
           metadata: { 
             playerSymbol,
             configIndex,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            retryCount
           }
         });
         
