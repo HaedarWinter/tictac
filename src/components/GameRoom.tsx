@@ -61,6 +61,23 @@ const peerConfigs = [
   }
 ];
 
+// Add additional PeerJS server option
+const peerJSServers = [
+  undefined, // Default PeerJS server
+  {
+    host: 'peerjs.herokuapp.com',
+    secure: true,
+    port: 443,
+    path: '/'
+  },
+  {
+    host: 'peerjs-server.herokuapp.com',
+    secure: true,
+    port: 443,
+    path: '/'
+  }
+];
+
 // We'll select the config based on reconnect attempts
 
 // Add a helper function to validate gameId format
@@ -95,12 +112,18 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
   const [connectionStatus, setConnectionStatus] = useState<'initializing' | 'connecting' | 'connected' | 'failed' | 'retrying'>('initializing');
   
   // Maximum number of reconnection attempts
-  const maxReconnectAttempts = 3;
+  const maxReconnectAttempts = 5; // Increased from 3 to 5
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  
+  // Track if component is still mounted
+  const isMountedRef = useRef(true);
   
   // For SSR compatibility
   useEffect(() => {
     setIsClient(true);
+    return () => {
+      isMountedRef.current = false;
+    };
   }, []);
   
   // Auto-scroll to bottom of chat when messages change
@@ -137,8 +160,15 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
     });
 
     connection.on('close', () => {
+      if (!isMountedRef.current) return;
       setOpponentConnected(false);
       setError('Opponent disconnected');
+    });
+    
+    connection.on('error', (err) => {
+      if (!isMountedRef.current) return;
+      console.error('Connection error:', err);
+      setError(`Connection error: ${(err as any).message || 'Unknown error'}`);
     });
   }, [handleOpponentMove]);
 
@@ -161,10 +191,21 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
 
     setConnectionStatus('initializing');
     let connectionTimeout: NodeJS.Timeout | null = null;
+    let peerInstance: PeerType | null = null;
 
     // Dynamically import PeerJS to avoid SSR issues
     const initPeer = async () => {
       try {
+        // Clean up any existing peer before creating a new one
+        if (peer && !peer.destroyed) {
+          console.log('Destroying existing peer before creating a new one');
+          try {
+            peer.destroy();
+          } catch (err) {
+            console.error('Error destroying existing peer:', err);
+          }
+        }
+        
         // Import PeerJS on the client-side only
         const { Peer } = await import('peerjs');
         
@@ -173,11 +214,19 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         
         // Select which configuration to use based on reconnect attempts
         // This allows us to try different configurations if the first one fails
-        const configIndex = Math.min(reconnectAttempts, peerConfigs.length - 1);
-        const selectedConfig = peerConfigs[configIndex];
+        const configIndex = Math.min(reconnectAttempts % peerConfigs.length, peerConfigs.length - 1);
+        const selectedConfig = JSON.parse(JSON.stringify(peerConfigs[configIndex]));
+        
+        // Try different PeerJS servers
+        const serverIndex = Math.floor(reconnectAttempts / peerConfigs.length) % peerJSServers.length;
+        const selectedServer = peerJSServers[serverIndex];
+        
+        if (selectedServer) {
+          Object.assign(selectedConfig, selectedServer);
+        }
         
         console.log(`Initializing peer with ID: ${peerId} (${isHost ? 'host' : 'guest'})`);
-        console.log(`Using config #${configIndex + 1} with retry attempt ${reconnectAttempts + 1}/${maxReconnectAttempts}`);
+        console.log(`Using config #${configIndex + 1} with server #${serverIndex + 1}, retry attempt ${reconnectAttempts + 1}/${maxReconnectAttempts}`);
         console.log('Selected config:', selectedConfig);
         
         setConnectionStatus('connecting');
@@ -187,7 +236,7 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
         
         // Create a copy of the selected peer config we can modify
-        const currentPeerConfig = JSON.parse(JSON.stringify(selectedConfig));
+        const currentPeerConfig = selectedConfig;
         
         if (isMobile) {
           console.log('Mobile device detected, optimizing PeerJS config');
@@ -218,12 +267,15 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         // Initialize PeerJS with the selected configuration
         console.log(`Creating peer with ID ${peerIdWithSuffix}`);
         const newPeer = new Peer(peerIdWithSuffix, currentPeerConfig);
+        peerInstance = newPeer;
         
         // Track if the peer connection was successful
         let peerConnected = false;
         
         // Set a global timeout to abandon this attempt if it takes too long
         connectionTimeout = setTimeout(() => {
+          if (!isMountedRef.current) return;
+          
           if (!peerConnected && reconnectAttempts < maxReconnectAttempts - 1) {
             console.log('Connection timed out, retrying...');
             setConnectionStatus('retrying');
@@ -279,6 +331,42 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
                 });
               });
             });
+          }
+        });
+        
+        // Handle disconnection from server
+        newPeer.on('disconnected', () => {
+          console.log('Peer disconnected from server, attempting to reconnect');
+          
+          // Don't try to reconnect if we're unmounting or already failed
+          if (!isMountedRef.current || connectionStatus === 'failed') return;
+          
+          // Try to reconnect to the signaling server
+          try {
+            newPeer.reconnect();
+          } catch (err) {
+            console.error('Failed to reconnect:', err);
+            
+            // If reconnect fails, destroy and recreate peer
+            if (reconnectAttempts < maxReconnectAttempts - 1) {
+              setConnectionStatus('retrying');
+              setReconnectAttempts(prev => prev + 1);
+              
+              // Clean up
+              try {
+                if (!newPeer.destroyed) {
+                  newPeer.destroy();
+                }
+              } catch (err) {
+                console.error('Error destroying peer during reconnect:', err);
+              }
+              
+              // Retry with delay
+              setTimeout(initPeer, 2000);
+            } else {
+              setConnectionStatus('failed');
+              setError('Connection to server lost and could not be reestablished.');
+            }
           }
         });
         
@@ -363,6 +451,16 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
     return () => {
       if (connectionTimeout) {
         clearTimeout(connectionTimeout);
+      }
+      
+      // Properly clean up peer instance
+      if (peerInstance && !peerInstance.destroyed) {
+        try {
+          console.log('Destroying peer on unmount');
+          peerInstance.destroy();
+        } catch (err) {
+          console.error('Error destroying peer on unmount:', err);
+        }
       }
     };
   }, [isClient, isHost, gameId, setupConnectionHandlers, reconnectAttempts, maxReconnectAttempts, gameState]);
@@ -554,8 +652,26 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
 
   // Leave the game and disconnect
   const handleLeaveGame = () => {
-    if (conn) conn.close();
-    if (peer && !peer.destroyed) peer.destroy();
+    // Ensure proper cleanup of connections
+    if (conn) {
+      try {
+        conn.close();
+      } catch (err) {
+        console.error('Error closing connection:', err);
+      }
+    }
+    
+    if (peer) {
+      try {
+        if (!peer.destroyed) {
+          console.log('Destroying peer on leave game');
+          peer.destroy();
+        }
+      } catch (err) {
+        console.error('Error destroying peer on leave game:', err);
+      }
+    }
+    
     onLeaveGame();
   };
 
