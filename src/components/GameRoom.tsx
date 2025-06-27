@@ -485,6 +485,14 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
     
     const attemptConnection = () => {
       try {
+        // Validate the gameId before attempting to connect
+        if (!isValidPeerIdFormat(gameId)) {
+          console.error('Invalid game ID format:', gameId);
+          setConnectionStatus('failed');
+          setError('Invalid game ID format. Please check the game ID and try again.');
+          return;
+        }
+        
         // Select which configuration to use based on retry count
         const configIndex = Math.min(retryCount, peerConfigs.length - 1);
         const selectedConfig = peerConfigs[configIndex];
@@ -516,6 +524,15 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
         
         // Connect to the host with additional options
         console.log(`Connecting to host ${gameId} with config #${configIndex + 1}`);
+        
+        // Check if peer is valid before connecting
+        if (!peer || peer.destroyed) {
+          console.error('Peer is not valid or has been destroyed');
+          setConnectionStatus('failed');
+          setError('Connection error: Peer object is not valid. Please refresh and try again.');
+          return;
+        }
+        
         const connection = peer.connect(gameId, {
           reliable: true,
           serialization: 'json', // Explicitly use JSON serialization
@@ -525,6 +542,13 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
             timestamp: Date.now()
           }
         });
+        
+        if (!connection) {
+          console.error('Failed to create connection object');
+          setConnectionStatus('failed');
+          setError('Failed to establish connection. Please try again.');
+          return;
+        }
         
         // Handle connection open
         connection.on('open', () => {
@@ -558,6 +582,19 @@ export default function GameRoom({ gameId, isHost, onLeaveGame }: GameRoomProps)
           
           if (errorType === 'peer-unavailable' || errorMsg.includes('Could not connect to peer')) {
             errorMessage = 'Host not found. The game ID may be incorrect or the host is offline.';
+            
+            // For this specific error, we might want to try a different approach
+            if (retryCount === 0) {
+              // On first attempt with this error, try connecting with a different peer server
+              console.log('Attempting to connect with a different peer server configuration');
+              retryCount++;
+              setConnectionStatus('retrying');
+              
+              // Try a different server configuration immediately
+              if (connectionTimeout) clearTimeout(connectionTimeout);
+              retryTimeout = setTimeout(attemptConnection, 1000);
+              return;
+            }
           } else if (errorType === 'disconnected' || errorMsg.includes('disconnect')) {
             errorMessage = 'Connection lost. The host may have left the game.';
           } else if (errorType === 'network' || errorType === 'server-error' || 
